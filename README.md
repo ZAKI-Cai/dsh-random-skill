@@ -1,6 +1,6 @@
 # dsh-skillbox
 
-`v0.2.0`
+`v0.2.1`
 
 一个 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）插件：**随机生成 skill，试用它，再决定它的去留**，并用屏幕右侧一个可展开／可缩略的侧边栏管理 skillbox。
 
@@ -140,12 +140,39 @@ dsh plugin --profile desktop add link:/absolute/path/to/dsh-skillbox
 ## 开发
 
 ```bash
-# 纯 Node 自测：用桩上下文跑一遍生成 → 试用 → 保留 → 删除
+# 集成自测：桩上下文 + 真实 HTTP 服务器，跑完整请求路径
+# （路由、认证栅栏、JSON 信封、参数解析、生成 → 试用 → 保留 → 删除）
 node .selftest/harness.mjs
+
+# 工作区根路径判定的回归测试
+node .selftest/root-resolution.mjs
 
 # 语法检查
 node --check lib/index.js && node --check lib/client.js
 ```
+
+> **注意**：DSH 的 HMR 只监视应用自身目录，不监视工作区里的插件源码。改完插件代码必须**重启 DSH** 才会生效。
+> 用 `.selftest/harness.mjs` 可以在不重启的情况下验证 Host 半的全部逻辑。
+
+### 命令行探测正在运行的实例
+
+```powershell
+# 用 browser-session 凭据生成 cookie 后调用任意方法
+powershell -NoProfile -ExecutionPolicy Bypass -File .selftest/probe.ps1 -Method list
+powershell -NoProfile -ExecutionPolicy Bypass -File .selftest/probe.ps1 -Method diagnose
+```
+
+## 工作区根路径是怎么定的
+
+skillbox 必须落在**用户的工作区**，而不是 DSH 的配置目录。判定顺序（`lib/index.js` 的 `workspaceRootOf`）：
+
+1. 当前请求或工具调用所属 Session 的 `header.cwd`；
+2. 本进程上一次观察到的 Session 工作区（浏览器请求本身不带 Session，靠它兜住）；
+3. 现存 Session 中创建时间最新的那个的 `cwd`；
+4. 沙箱策略的 `workspaceRoot` —— **但如果是 `DSH_PROFILE_DIR` / `DSH_HOME` 就直接否决**；
+5. 最后才退回 `process.cwd()`。
+
+`/api/skillbox/diagnose` 会把这几个候选值与最终选择一起返回，便于排查。
 
 ## 已知限制
 
@@ -153,8 +180,15 @@ node --check lib/index.js && node --check lib/client.js
 - 侧边栏是 `shell.overlay` 上的固定定位面板，不参与右侧栏的分栏／拖拽布局。
 - 一次只有一个「待决定」的 skill：再次生成时，上一个未决定的试用会被视为已保留（文件不动）。
 - 生成器产出的是中文 skill；它不会调用模型，纯本地组合。
+- DSH 的 HMR 不监视工作区，插件代码改动需要重启 DSH 生效。
 
 ## 变更记录
+
+### v0.2.1
+
+- **修复**：skillbox 曾被建到 DSH profile 目录（`~/.dsh/profiles/<profile>/skillbox`），因为插件直接采信了沙箱策略的 `workspaceRoot`。现在优先用真实 Session 的 `cwd`，并把 profile/home 目录列入黑名单；新增 `/api/skillbox/diagnose` 输出判定过程。
+- `.selftest/harness.mjs` 升级为**真实 HTTP 服务器集成测试**（覆盖认证栅栏、未知方法、跨工作区拒绝、完整生命周期）。
+- 新增 `.selftest/root-resolution.mjs` 回归测试，钉住「策略根 = profile 时必须选中 Session 工作区」这一行为。
 
 ### v0.2.0
 

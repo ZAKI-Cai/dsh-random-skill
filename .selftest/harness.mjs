@@ -1,10 +1,13 @@
 /**
- * Local harness: runs the skillbox host half against a stub Cordis context so the
- * plugin's own logic can be exercised without a running DSH process.
+ * Local harness: runs the skillbox host half against a stub Cordis context and a
+ * real HTTP server, so the whole request path — route, auth fence, JSON envelope,
+ * argument parsing, workspace-root resolution — is exercised without a running
+ * DSH process.
  *
  * Usage: node .selftest/harness.mjs
  */
 
+import { createServer } from 'node:http'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -13,19 +16,32 @@ import { apply } from '../lib/index.js'
 
 const pluginLog = []
 const report = []
-const log = (...args) => pluginLog.push(args.map((value) => (typeof value === 'string' ? value : JSON.stringify(value))).join(' '))
-const out = (...args) => report.push(args.map((value) => (typeof value === 'string' ? value : JSON.stringify(value))).join(' '))
+const log = (...args) => pluginLog.push(args.map(stringify).join(' '))
+const out = (...args) => report.push(args.map(stringify).join(' '))
+function stringify(value) {
+  return typeof value === 'string' ? value : JSON.stringify(value)
+}
 
-let routes = []
+/** Workspace root this run pretends to be the user's project. */
+const ROOT = await mkdtemp(join(tmpdir(), 'skillbox-harness-'))
+
+const routes = []
+const registered = []
 const effects = []
+
 const stub = {
   logger: { info: log, warn: log, error: log, debug: () => {} },
   get: (name) => {
     if (name === 'sandboxPolicy') return { workspaceRoot: ROOT }
     if (name === 'webServer') return { register: (route) => (routes.push(route), () => {}) }
-    if (name === 'sessions') return { get: () => undefined }
+    if (name === 'sessions') return { get: () => undefined, list: () => [] }
     if (name === 'tools') return { register: (definition) => (registered.push(definition), () => {}) }
     if (name === 'systemPrompt') return { section: () => () => {} }
+    if (name === 'connection') {
+      // The real fence rejects unauthenticated requests; this stub accepts only a
+      // request carrying the header the harness sends.
+      return { admit: (req) => (req.headers['x-harness-auth'] === 'yes' ? { peer: {} } : { rejection: 401 }) }
+    }
     return undefined
   },
   inject: (deps, callback) => {
@@ -42,39 +58,103 @@ const stub = {
     return () => {}
   },
 }
-const registered = []
 
-const ROOT = await mkdtemp(join(tmpdir(), 'skillbox-harness-'))
+let port = 0
+
+/** Minimal request helper against the harness server. */
+async function request(method, path, body, headers = {}) {
+  const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+    method,
+    headers: { 'content-type': 'application/json', 'x-harness-auth': 'yes', ...headers },
+    body: method === 'GET' ? undefined : JSON.stringify(body ?? {}),
+  })
+  const text = await response.text()
+  let json
+  try {
+    json = JSON.parse(text)
+  } catch {
+    json = undefined
+  }
+  return { status: response.status, text, json }
+}
 
 try {
   const api = apply(stub)
   await new Promise((resolve) => setTimeout(resolve, 50))
-  out('workspaceRoot =', api.workspaceRoot())
-  out('routes =', routes.map((route) => `${route.kind} ${route.path}`).join(', '))
-  out('tools =', registered.map((definition) => definition.name).join(', '))
 
-  const kick = api.methods.kick
-  const created = await kick({}, undefined)
-  out('generated =', created.skill.name, '|', created.skill.description)
-  out('view.skills =', JSON.stringify(created.view.skills.map((skill) => [skill.name, skill.state, skill.enabled])))
-  out('pending =', created.view.pending)
+  const server = createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    const route = routes
+      .filter((entry) => url.pathname.startsWith(entry.path))
+      .sort((left, right) => right.path.length - left.path.length)[0]
+    if (route === undefined) {
+      res.statusCode = 404
+      res.end('not found')
+      return
+    }
+    route.handler(req, res)
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  port = server.address().port
+
+  out(`workspaceRoot = ${api.workspaceRoot()}`)
+  out(`expected root = ${ROOT}`)
+  out(`routes = ${routes.map((route) => `${route.kind} ${route.path}`).join(', ')}`)
+  out(`tools = ${registered.map((definition) => definition.name).join(', ')}`)
+
+  // The fence must reject before any state changes.
+  const denied = await request('POST', '/api/skillbox/list', {}, { 'x-harness-auth': 'no' })
+  out(`unauthenticated list -> ${denied.status} ${JSON.stringify(denied.text)}`)
+
+  const missing = await request('POST', '/api/skillbox/nope', {})
+  out(`unknown method -> ${missing.status} ${JSON.stringify(missing.json)}`)
+
+  const diagnose = await request('POST', '/api/skillbox/diagnose', {})
+  out(`diagnose -> ${JSON.stringify(diagnose.json)}`)
+
+  const kick = await request('POST', '/api/skillbox/kick', {})
+  const skillName = kick.json?.skill?.name
+  out(`kick -> ${kick.status} name=${skillName}`)
+  out(`kick description = ${kick.json?.skill?.description}`)
+  out(`kick view.skills = ${JSON.stringify(kick.json?.view?.skills?.map((skill) => [skill.name, skill.state, skill.enabled]))}`)
+
+  const list = await request('POST', '/api/skillbox/list', {})
+  out(`list -> ${list.status} root=${list.json?.root} pending=${list.json?.pending}`)
+
+  const pending = await request('POST', '/api/skillbox/pending', {})
+  out(`pending -> ${pending.status} name=${pending.json?.offer?.name} bodyChars=${pending.json?.offer?.body?.length}`)
+
+  const toggled = await request('POST', '/api/skillbox/toggle', { name: skillName, enabled: false })
+  out(`toggle off -> ${toggled.status} ${JSON.stringify(toggled.json?.view?.skills?.map((skill) => [skill.name, skill.state, skill.enabled]))}`)
+
+  const kept = await request('POST', '/api/skillbox/decide', { name: skillName, decision: 'keep' })
+  out(`keep -> ${kept.status} ${JSON.stringify(kept.json?.view?.skills?.map((skill) => [skill.name, skill.state, skill.enabled]))}`)
+
+  const removed = await request('POST', '/api/skillbox/remove', { name: skillName })
+  out(`remove -> ${removed.status} ${JSON.stringify(removed.json?.view?.skills)}`)
+
+  const badRoot = await request('POST', '/api/skillbox/list', { root: 'C:/somewhere/else' })
+  out(`cross-workspace list -> ${badRoot.status} ${JSON.stringify(badRoot.json?.error)}`)
+
+  const refusedRoot = await request('POST', '/api/skillbox/list', { root: process.env.DSH_PROFILE_DIR ?? 'C:/none' })
+  out(`refused-root list -> ${refusedRoot.status} ${JSON.stringify(refusedRoot.json?.error)}`)
 
   const pendingTool = registered.find((definition) => definition.name === 'skillbox_pending')
   const pendingValue = await pendingTool.execute({}, {})
-  out('skillbox_pending ->', pendingValue.name, '| body chars =', pendingValue.instructions.length)
+  out(`skillbox_pending -> name=${pendingValue.name === '' ? '(none)' : pendingValue.name}`)
 
+  const generated = await api.generate()
   const decideTool = registered.find((definition) => definition.name === 'skillbox_decide')
-  out('skillbox_decide ->', JSON.stringify(await decideTool.execute({ name: created.skill.name }, {})))
-
-  const toggled = await api.methods.toggle({ name: created.skill.name, enabled: false }, undefined)
-  out('toggle off ->', JSON.stringify(toggled.view.skills.map((skill) => [skill.name, skill.state, skill.enabled])))
-
-  const removed = await api.methods.remove({ name: created.skill.name }, undefined)
-  out('remove ->', JSON.stringify(removed.view.skills.map((skill) => [skill.name, skill.state, skill.enabled])))
+  out(`skillbox_decide -> ${JSON.stringify(await decideTool.execute({ name: generated.skill.name }, {}))}`)
 
   out('--- plugin log ---')
   for (const line of pluginLog) out(line)
   console.log(report.join('\n'))
+
+  await new Promise((resolve) => server.close(resolve))
+} catch (error) {
+  console.error('HARNESS FAILED:', error)
+  process.exitCode = 1
 } finally {
   for (const { disposer, label } of effects.reverse()) {
     try {
