@@ -112,17 +112,39 @@ try {
   const diagnose = await request('POST', '/api/skillbox/diagnose', {})
   out(`diagnose -> ${JSON.stringify(diagnose.json)}`)
 
+  const catalogue = await request('POST', '/api/skillbox/catalogue', {})
+  out(
+    `catalogue -> ${catalogue.status} domains=${catalogue.json?.domains?.length} families=${catalogue.json?.families} combinations=${catalogue.json?.combinations} minChars=${catalogue.json?.minDocumentChars}`,
+  )
+  out(`catalogue domains = ${(catalogue.json?.domains ?? []).map((domain) => `${domain.label}(${domain.families.length})`).join(', ')}`)
+  out(`catalogue window = ${JSON.stringify(catalogue.json?.window)}`)
+
   const kick = await request('POST', '/api/skillbox/kick', {})
   const skillName = kick.json?.skill?.name
   out(`kick -> ${kick.status} name=${skillName}`)
   out(`kick description = ${kick.json?.skill?.description}`)
+  out(`kick topic = ${JSON.stringify(kick.json?.skill?.topic)}`)
+  out(`kick characters = ${kick.json?.skill?.characters} valid=${kick.json?.skill?.validation?.ok}`)
+  out(`kick window = ${JSON.stringify(kick.json?.window)}`)
   out(`kick view.skills = ${JSON.stringify(kick.json?.view?.skills?.map((skill) => [skill.name, skill.state, skill.enabled]))}`)
 
   const list = await request('POST', '/api/skillbox/list', {})
   out(`list -> ${list.status} root=${list.json?.root} pending=${list.json?.pending}`)
 
   const pending = await request('POST', '/api/skillbox/pending', {})
-  out(`pending -> ${pending.status} name=${pending.json?.offer?.name} bodyChars=${pending.json?.offer?.body?.length}`)
+  out(
+    `pending -> ${pending.status} name=${pending.json?.offer?.name} domain=${pending.json?.offer?.domainLabel} chars=${pending.json?.offer?.characters} bodyChars=${pending.json?.offer?.body?.length}`,
+  )
+
+  // Narrowing a draw, and the metadata that survives a round trip through disk.
+  const narrowed = await request('POST', '/api/skillbox/kick', { topic: { domainId: 'bio' } })
+  out(
+    `kick(domainId=bio) -> ${narrowed.status} name=${narrowed.json?.skill?.name} domain=${narrowed.json?.skill?.domainLabel}`,
+  )
+  const afterNarrow = await request('POST', '/api/skillbox/list', {})
+  out(`after narrowed kick -> pending=${afterNarrow.json?.pending} skills=${JSON.stringify(afterNarrow.json?.skills?.map((skill) => [skill.name, skill.state]))}`)
+  const removedNarrow = await request('POST', '/api/skillbox/remove', { name: narrowed.json?.skill?.name })
+  out(`remove narrowed -> pending=${removedNarrow.json?.view?.pending} skills=${JSON.stringify(removedNarrow.json?.view?.skills?.map((skill) => [skill.name, skill.state]))}`)
 
   const toggled = await request('POST', '/api/skillbox/toggle', { name: skillName, enabled: false })
   out(`toggle off -> ${toggled.status} ${JSON.stringify(toggled.json?.view?.skills?.map((skill) => [skill.name, skill.state, skill.enabled]))}`)

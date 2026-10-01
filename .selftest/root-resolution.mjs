@@ -62,5 +62,27 @@ assert(rememberedApi.workspaceRoot() !== PROJECT, 'before the first call the pro
 await rememberedApi.generate({ header: { cwd: PROJECT } })
 assert(rememberedApi.workspaceRoot() === PROJECT, 'an agent-scoped call teaches the plugin the Session workspace')
 
+// 4. The generator's contract: every draw is structurally complete, and the whole
+//    catalogue is reachable. This is what keeps "the document must be specific
+//    enough" from regressing as families are added.
+const generator = await import('../lib/generator.js')
+const catalogue = generator.catalogue()
+assert(catalogue.length >= 8, `at least 8 domains are catalogued (${catalogue.length})`)
+assert(generator.families().length >= 36, `at least 36 task families are catalogued (${generator.families().length})`)
+assert(generator.combinationCount() >= 100, `at least 100 family×recipe combinations (${generator.combinationCount()})`)
+
+const seenDomains = new Set()
+const taken = new Set()
+let shortest = Infinity
+for (let index = 0; index < 400; index += 1) {
+  const skill = generator.generateSkill({ taken: [...taken] })
+  taken.add(skill.name)
+  seenDomains.add(skill.domain)
+  shortest = Math.min(shortest, skill.characters)
+  if (!skill.validation.ok) throw new Error(`draw ${skill.name} failed validation: ${skill.validation.problems.join('; ')}`)
+}
+assert(seenDomains.size === catalogue.length, `400 draws reach every domain (${seenDomains.size}/${catalogue.length})`)
+assert(shortest >= generator.MIN_DOCUMENT_CHARS, `every draw meets the minimum document size (shortest ${shortest})`)
+
 await rm(PROJECT, { recursive: true, force: true })
 console.log('\nroot-resolution: all assertions passed')
