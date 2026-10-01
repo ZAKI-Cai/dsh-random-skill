@@ -1,0 +1,15 @@
+# ============================================================================
+# dsh-skillbox —— DSH bundle patch
+# ============================================================================
+# 插件的挂载声明。DSH 启动时按 bundle 层栈叠加各插件 patch，
+# 本文件把 dsh-skillbox 插入 profile 的配置树。
+#
+# 安装：
+#   dsh plugin --profile desktop add link:<本目录绝对路径>
+# 或把本仓库推到 GitHub 后：
+#   dsh plugin --profile desktop add github:<owner>/<repo>
+# ============================================================================
+
+- insert:
+    - id: dsh-skillbox
+      name: dsh-skillbox
