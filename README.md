@@ -1,8 +1,11 @@
 # dsh-skillbox
 
-`v0.2.2`
+`v0.3.0`
 
 一个 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）插件：**随机生成 skill，试用它，再决定它的去留**，并用屏幕右侧一个可展开／可缩略的侧边栏管理 skillbox。
+
+> 每一条生成的 skill 都可复现：种子随 skill 一起落盘，侧边栏的「重放校验」会重新生成一份并逐字节比对。
+> 工程结构与取舍（含已知缺陷与路线图）见 [DESIGN-REVIEW.md](DESIGN-REVIEW.md)。
 
 ```text
 点「生成随机 Skill」
@@ -157,10 +160,12 @@ dsh plugin --profile desktop add link:/absolute/path/to/dsh-skillbox
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
+| `POST` | `/api/skillbox/info` | 契约握手：`apiVersion`、方法集、目录规模、时间窗 |
 | `POST` | `/api/skillbox/list` | 读取 skillbox 与待决定项 |
-| `POST` | `/api/skillbox/kick` | 生成一个随机 skill；可传 `{ topic: { domainId, familyId } }` 收窄选题 |
+| `POST` | `/api/skillbox/kick` | 生成一个随机 skill；可传 `{ topic: { domainId, familyId } }` 收窄选题，或 `{ seed }` 复现 |
+| `POST` | `/api/skillbox/replay` | `{ name, seed? }` 用种子重放并逐字节比对磁盘文件，返回 `reproducible` 与差异 |
 | `POST` | `/api/skillbox/catalogue` | 生成目录：领域、任务族、配方、组合数、两个时间窗、文档最小字数 |
-| `POST` | `/api/skillbox/pending` | 当前待试用的 skill（含完整正文与领域元数据） |
+| `POST` | `/api/skillbox/pending` | 当前待试用的 skill（含完整正文、种子与领域元数据） |
 | `POST` | `/api/skillbox/toggle` | `{ name, enabled }` 启用／禁用 |
 | `POST` | `/api/skillbox/decide` | `{ name, decision: "keep" \| "delete" \| "disable" }` |
 | `POST` | `/api/skillbox/remove` | `{ name }` 删除 |
@@ -169,48 +174,69 @@ dsh plugin --profile desktop add link:/absolute/path/to/dsh-skillbox
 | `POST` | `/api/skillbox/diagnose` | 工作区根路径的判定过程（候选值 + 最终选择 + 被否决值） |
 | `GET` | `/api/skillbox/events` | SSE 变更推送 |
 
-`kick` 的响应里带 `window`（`selectMinMs/selectMaxMs/authorMinMs/authorMaxMs`）与 `composition.composeMs`，客户端据此呈现两个阶段。所有写操作都会先校验请求里的工作区根路径是否等于当前工作区，跨工作区与指向 `DSH_PROFILE_DIR`/`DSH_HOME` 的写入都会被拒绝。
+每个成功响应都是 `{ ok: true, apiVersion, ... }`，每个失败响应都是 `{ ok: false, apiVersion, code, error, details? }`——客户端只按 `code` 分支，不匹配文案。`kick` 的响应里带 `window`（`selectMinMs/selectMaxMs/authorMinMs/authorMaxMs`）与 `composition.composeMs`，客户端据此呈现两个阶段。所有写操作都会先校验请求里的工作区根路径是否等于当前工作区，跨工作区与指向 `DSH_PROFILE_DIR`/`DSH_HOME` 的写入都会被拒绝。
 
 ---
 
-## 工作原理
+## 结构
 
-- **Host 半**（`lib/index.js`、`lib/store.js`、`lib/domains.js`、`lib/recipes.js`、`lib/generator.js`、`lib/tools.js`）：skillbox 的唯一写入者。它负责生成 skill、维护 `.skillbox.json`、复制／删除启用副本、注册 `skillbox_pending` / `skillbox_decide` 两个工具，并提供上面那张 HTTP 表。
-  - `domains.js` 是**领域知识**：8 个领域、36 个任务族，每族带自己的对象、术语、硬规则、证据类型、失败模式与完成闸门。
-  - `recipes.js` 是**配方骨架**：7 种工作类型（分析／方案设计／核查／教学／转译／决策／产出），各带 6 步流程、证据标准、产出契约与过程约束。
-  - `generator.js` 把两者与一次随机抽取交叉组合，渲染成完整文档并做 12 项结构校验。
-- **Client 半**（`lib/client.js`）：一个手写的 DSH 客户端 bundle（`window.__ModuleLoader__.load`，无构建步骤）。它注册三个壳座位：`shell.overlay`（右侧侧边栏）、`sidebar.footer.action`（生成按钮）、`conversation.input.dock`（试用/进度卡片），通过上面那张 HTTP 表与 Host 通信。
+```
+lib/
+├── contract.js         Host↔浏览器契约：前缀、版本、方法表、错误码、信封
+├── index.js            组合与生命周期（唯一写入者的门面）
+├── workspace.js        工作区根判定 + 拒绝名单 + diagnose（端口注入，可单测）
+├── routes.js           HTTP 面：认证栅栏、JSON 信封、状态码、SSE、体积上限
+├── store.js            skillbox 目录与元数据；mutate() 是唯一原子写入口
+├── generator.js        种子 → 文档；seededRandom / validateSkill / catalogue
+├── domains.js          领域知识：8 领域 36 任务族
+├── recipes.js          配方骨架：7 种工作类型
+├── tools.js            两个模型侧工具（复用 tool-contract.js 的 schema）
+├── tool-contract.js    工具参数与结果 schema、提示词段落（单一来源）
+├── client-core.js      浏览器半的非 React 部分（可注入 fetc/时钟，可单测）
+└── client.js           浏览器半的 React 组件与壳座位注册
+```
+
+- **Host 半**：skillbox 的唯一写入者——生成、维护 `.skillbox.json`、复制／删除启用副本、注册两个工具、提供 HTTP 表。
+- **Client 半**：一个手写的 DSH 客户端 bundle（`window.__ModuleLoader__.load`，无构建步骤）。`client-core.js` 先加载并装上 `globalThis.__dshSkillboxCore`，`client.js` 只保留组件，注册三个壳座位：`shell.overlay`（右侧侧边栏）、`sidebar.footer.action`（生成按钮）、`conversation.input.dock`（试用/进度卡片）。
 - **启用即副本**：模型能不能看到某个 skill，只取决于 `.dsh/skills/<name>/SKILL.md` 是否存在。这让「启用开关」拥有一份唯一真相，也让 DSH 自带的文件监听负责推送目录变更。
 
 ## 开发
 
 ```bash
-# 集成自测：桩上下文 + 真实 HTTP 服务器，跑完整请求路径
-# （路由、认证栅栏、JSON 信封、参数解析、生成 → 试用 → 保留 → 删除）
+# 1) 契约漂移：前缀/版本/方法表/错误码镜像、Host 实现完整性、工具 schema 与渲染一致
+node .selftest/contract.mjs
+
+# 2) 浏览器核心：调用契约、错误码与本地化、版本不匹配、授权窗口状态机、取消、镜像不漂移
+node .selftest/client-core.mjs
+
+# 3) 真实 HTTP 集成：认证栅栏、404/405/413/400、错误码、目录接口、收窄选题、
+#    种子重放逐字节一致、跨工作区拒绝、完整生命周期
 node .selftest/harness.mjs
 
-# 工作区根路径判定 + 生成器契约的回归测试
-# （策略根=profile 时必须选中 Session 工作区；400 次抽取全部结构达标且覆盖所有领域）
+# 4) 工作区根判定 + 生成器契约：400 次抽取全覆盖且达标、重放确定性、ContractError 语义
 node .selftest/root-resolution.mjs
 
 # 语法检查
-node --check lib/index.js && node --check lib/client.js
+for f in lib/*.js; do node --check "$f"; done
 ```
 
+四个套件都在 Node 里跑完，不需要浏览器、也不需要运行中的 DSH。
+
 > **注意**：DSH 的 HMR 只监视应用自身目录，不监视工作区里的插件源码。改完插件代码必须**重启 DSH** 才会生效。
-> 用 `.selftest/harness.mjs` 可以在不重启的情况下验证 Host 半的全部逻辑。
+> 用上面 3、4 号套件可以在不重启的情况下验证 Host 半的全部逻辑。
 
 ### 命令行探测正在运行的实例
 
 ```powershell
 # 用 browser-session 凭据生成 cookie 后调用任意方法
-powershell -NoProfile -ExecutionPolicy Bypass -File .selftest/probe.ps1 -Method list
+powershell -NoProfile -ExecutionPolicy Bypass -File .selftest/probe.ps1 -Method info
 powershell -NoProfile -ExecutionPolicy Bypass -File .selftest/probe.ps1 -Method diagnose
+powershell -NoProfile -ExecutionPolicy Bypass -File .selftest/probe.ps1 -Method replay -Body '{"name":"<skill 名>"}'
 ```
 
 ## 工作区根路径是怎么定的
 
-skillbox 必须落在**用户的工作区**，而不是 DSH 的配置目录。判定顺序（`lib/index.js` 的 `workspaceRootOf`）：
+skillbox 必须落在**用户的工作区**，而不是 DSH 的配置目录。判定顺序（`lib/workspace.js` 的 `rootOf`）：
 
 1. 当前请求或工具调用所属 Session 的 `header.cwd`；
 2. 本进程上一次观察到的 Session 工作区（浏览器请求本身不带 Session，靠它兜住）；
@@ -223,6 +249,10 @@ skillbox 必须落在**用户的工作区**，而不是 DSH 的配置目录。�
 ## 已知限制
 
 - **文档是本地合成、不是模型撰写**：生成器不调用模型，所以选题与文档质量由 `domains.js` / `recipes.js` 的知识量决定，而不是模型的即时创作。想更深，就往这两个文件里加任务族或配方。
+- **界面文案未接入 i18n**：`dsh.client.inject` 里声明了 `dsh-client-locale`，但组件仍硬编码中文；英文用户会看到中英混排。这是路线图第 1 项。
+- **`client-core.js` 是组合内的一份外部脚本**：由 `package.json` 的 `dsh.client.external` 声明，靠 DSH 的模块系统保证“先核心、后组件”的加载顺序；`.selftest/contract.mjs` 会检查两者的关系没有退化。
+- **`.skillbox.json` 无并发写保护**：多窗口同时写会互相覆盖（原子替换只保证不撕裂，不保证不丢更新）。
+- `kick` 无节流：快速连点会连写多个 trial（同一时刻只有一个 pending，但磁盘上会留下多个）。
 - 客户端半是手写的 bundle，不经过打包器；它只依赖模块表里的 `react`。
 - 侧边栏是 `shell.overlay` 上的固定定位面板，不参与右侧栏的分栏／拖拽布局。
 - 一次只有一个「待决定」的 skill：再次生成时，上一个未决定的试用会被视为已保留（文件不动）。
@@ -230,6 +260,21 @@ skillbox 必须落在**用户的工作区**，而不是 DSH 的配置目录。�
 - DSH 的 HMR 不监视工作区，插件代码改动需要重启 DSH 生效。
 
 ## 变更记录
+
+### v0.3.0 —— 工程化与可复现
+
+设计评审与逐项处置见 [DESIGN-REVIEW.md](DESIGN-REVIEW.md)。这一版没有新功能，全部是结构与可靠性：
+
+- **契约单一真相**：新增 `lib/contract.js`（前缀／`API_VERSION`／方法表／错误码／信封／`ContractError`）。新增 `/api/skillbox/info` 握手，方法集或版本不一致时面板直接报错，而不是等第一次点击失败。每个响应都带 `apiVersion` 与稳定的 `code`。
+- **客户端半可测**：非 React 逻辑抽到 `lib/client-core.js`（经典脚本，装到 `globalThis.__dshSkillboxCore`），通过 `dsh.client.external` 先加载；`lib/client.js` 从 1063 行降到 760 行，只保留组件。新增 `.selftest/client-core.mjs`，用假 `fetch` 与假时钟覆盖 API 调用、错误包装、版本不匹配、授权窗口状态机与取消路径。
+- **生成可复现**：`seededRandom` (mulberry32) + 种子随 skill 落盘并显示在卡片上；新增 `/api/skillbox/replay` 与侧边栏「重放校验」按钮，逐字节比对磁盘文件并给出差异。重放时钉住 `domain + family + recipe`，避免候选池受“已有哪些名字”影响（这是集成测试里真实撞到的坑）。
+- **元数据原子写**：`Skillbox.mutate()` 成为唯一读—改—写入口，`patchMany()` 让一次生命周期操作只写一次 `.skillbox.json`，消除崩溃/轮询可能读到的中间态。
+- **工具 schema 单一来源**：新增 `lib/tool-contract.js`，并以测试断言「渲染只读 schema 声明过的字段」。
+- **可访问性**：`Escape` 收起面板、展开/收纳按钮带 `aria-expanded`/`aria-controls` 且收起后归还焦点、列表 `role="list"`、卡片 `<article>` + 可读 `aria-label`、进度与重放结果 `role="status"` + `aria-live`、错误 `role="alert"`、统一 `:focus-visible` 焦点环。
+- **入口拆分**：`workspace.js`（工作区判定，端口注入故可单测）与 `routes.js`（认证栅栏／信封／状态码／SSE）独立成模块，`index.js` 只做组合；认证栅栏从“写在 handler 内部”变成单一入口，同类缺陷不可能只修一半。
+- **测试从 2 个套件扩到 4 个**：`contract.mjs`（契约漂移 + 工具 schema 一致性）、`client-core.mjs`（浏览器核心行为）、`harness.mjs`（真实 HTTP，含错误码与重放断言）、`root-resolution.mjs`（工作区判定 + 生成器契约 + 重放确定性 + `ContractError` 语义）。全部不需要浏览器或运行中的 DSH。
+
+已知限制新增：客户端文案仍硬编码中文（已声明 locale 服务但未接入），详见路线图。
 
 ### v0.2.2
 

@@ -78,11 +78,12 @@ async function request(method, path, body, headers = {}) {
   return { status: response.status, text, json }
 }
 
+let server
 try {
   const api = apply(stub)
   await new Promise((resolve) => setTimeout(resolve, 50))
 
-  const server = createServer((req, res) => {
+  server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
     const route = routes
       .filter((entry) => url.pathname.startsWith(entry.path))
@@ -112,6 +113,20 @@ try {
   const diagnose = await request('POST', '/api/skillbox/diagnose', {})
   out(`diagnose -> ${JSON.stringify(diagnose.json)}`)
 
+  const info = await request('POST', '/api/skillbox/info', {})
+  out(`info -> ${info.status} apiVersion=${info.json?.apiVersion} methods=${info.json?.methods?.length} combos=${info.json?.catalogue?.combinations}`)
+
+  // Every failure must carry a stable code, not only a message.
+  const badJson = await fetch(`http://127.0.0.1:${port}/api/skillbox/list`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-harness-auth': 'yes' },
+    body: '{not json',
+  })
+  out(`malformed body -> ${badJson.status} ${JSON.stringify(await badJson.json())}`)
+
+  const unknownSkill = await request('POST', '/api/skillbox/replay', { name: 'does-not-exist' })
+  out(`replay unknown skill -> ${unknownSkill.status} code=${unknownSkill.json?.code}`)
+
   const catalogue = await request('POST', '/api/skillbox/catalogue', {})
   out(
     `catalogue -> ${catalogue.status} domains=${catalogue.json?.domains?.length} families=${catalogue.json?.families} combinations=${catalogue.json?.combinations} minChars=${catalogue.json?.minDocumentChars}`,
@@ -135,6 +150,23 @@ try {
   out(
     `pending -> ${pending.status} name=${pending.json?.offer?.name} domain=${pending.json?.offer?.domainLabel} chars=${pending.json?.offer?.characters} bodyChars=${pending.json?.offer?.body?.length}`,
   )
+  out(`pending seed = ${pending.json?.offer?.seed}`)
+
+  // Determinism: the recorded seed must re-derive the document byte for byte.
+  const replay = await request('POST', '/api/skillbox/replay', { name: skillName })
+  out(
+    `replay -> ${replay.status} seed=${replay.json?.seed} reproducible=${replay.json?.reproducible} replayedName=${replay.json?.replayedName}`,
+  )
+  if (replay.json?.reproducible !== true) {
+    throw new Error(`replay of ${skillName} was not reproducible: ${JSON.stringify(replay.json?.differences)}`)
+  }
+
+  // The same seed twice must produce identical bytes through the generator itself.
+  const generator = await import('../lib/generator.js')
+  const first = generator.generateSkill({ seed: 123456, taken: [] })
+  const second = generator.generateSkill({ seed: 123456, taken: [] })
+  out(`seeded determinism -> ${first.body === second.body && first.name === second.name}`)
+  if (first.body !== second.body) throw new Error('the same seed produced two different documents')
 
   // Narrowing a draw, and the metadata that survives a round trip through disk.
   const narrowed = await request('POST', '/api/skillbox/kick', { topic: { domainId: 'bio' } })
@@ -187,4 +219,10 @@ try {
     }
   }
   await rm(ROOT, { recursive: true, force: true })
+  // A failed assertion must not leave the harness hanging on an open socket.
+  if (server !== undefined) {
+    server.closeAllConnections?.()
+    await new Promise((resolve) => server.close(resolve))
+  }
+  process.exit(process.exitCode ?? 0)
 }

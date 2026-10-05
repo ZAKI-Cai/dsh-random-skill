@@ -84,5 +84,29 @@ for (let index = 0; index < 400; index += 1) {
 assert(seenDomains.size === catalogue.length, `400 draws reach every domain (${seenDomains.size}/${catalogue.length})`)
 assert(shortest >= generator.MIN_DOCUMENT_CHARS, `every draw meets the minimum document size (shortest ${shortest})`)
 
+// 5. Replay determinism: the same seed with the same pinned topic must reproduce
+//    the exact document, including its name. This is what the sidebar's "重放校验"
+//    button and a bug report quoting a seed both rely on.
+const pinned = { seed: 424242, domainId: 'bio', familyId: 'species-identification', recipes: ['analyze'], taken: [] }
+const replayA = generator.generateSkill(pinned)
+const replayB = generator.generateSkill(pinned)
+assert(replayA.name === replayB.name, `replay reproduces the name (${replayA.name})`)
+assert(replayA.body === replayB.body, 'replay reproduces the document byte for byte')
+assert(replayA.seed === 424242, 'the seed is reported back unchanged')
+
+// 6. A different seed must produce a different document, or the seed is doing no work.
+const other = generator.generateSkill({ ...pinned, seed: 424243 })
+assert(other.body !== replayA.body, 'a different seed produces a different document')
+
+// 7. An unimplemented narrowing is a coded contract failure, not a bare Error.
+const { ContractError, ERROR_CODES } = await import('../lib/contract.js')
+try {
+  generator.generateSkill({ domainId: 'no-such-domain' })
+  throw new Error('expected a ContractError for an unknown domain')
+} catch (error) {
+  assert(error instanceof ContractError, 'an unknown domain raises a ContractError')
+  assert(error.code === ERROR_CODES.NO_MATCHING_TOPIC, `the failure carries code ${ERROR_CODES.NO_MATCHING_TOPIC}`)
+}
+
 await rm(PROJECT, { recursive: true, force: true })
 console.log('\nroot-resolution: all assertions passed')

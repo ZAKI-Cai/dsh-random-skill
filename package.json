@@ -1,6 +1,6 @@
 {
   "name": "dsh-skillbox",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "DSH 插件：随机生成 skill、试用/保留/删除生命周期管理，以及屏幕右侧可展开缩略的 skillbox 侧边栏",
   "keywords": [
     "dsh",
@@ -32,6 +32,9 @@
     },
     "client": {
       "platform": "web",
+      "external": [
+        "./client-core.js"
+      ],
       "inject": [
         "@deepseek-ai/dsh-client-ui-slots",
         "@deepseek-ai/dsh-client-ui-sidebar-right",
