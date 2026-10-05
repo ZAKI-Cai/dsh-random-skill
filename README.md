@@ -1,6 +1,6 @@
 # dsh-skillbox
 
-`v0.3.0`
+`v0.3.1`
 
 一个 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）插件：**随机生成 skill，试用它，再决定它的去留**，并用屏幕右侧一个可展开／可缩略的侧边栏管理 skillbox。
 
@@ -192,12 +192,20 @@ lib/
 ├── recipes.js          配方骨架：7 种工作类型
 ├── tools.js            两个模型侧工具（复用 tool-contract.js 的 schema）
 ├── tool-contract.js    工具参数与结果 schema、提示词段落（单一来源）
-├── client-core.js      浏览器半的非 React 部分（可注入 fetc/时钟，可单测）
-└── client.js           浏览器半的 React 组件与壳座位注册
+├── client-core.js      浏览器半的非 React 部分（可注入 fetch/时钟，可单测）
+└── client.js           交付的客户端 bundle：内联 client-core 的正文 + React 组件
 ```
 
+`lib/client.js` 是**自包含**的单文件 bundle（DSH 客户端模块系统每个插件只加载一个文件，多带一个未注册脚本会让整个 bundle 加载失败）。因此 `client-core.js` 是**作者源**——测试与阅读都以它为准——由 `.selftest/sync-client-core.mjs` 把它的正文抽掉 IIFE 外壳与发布尾巴后，逐行内联进 `client.js` 的标记块：
+
+```bash
+node .selftest/sync-client-core.mjs   # 改完 client-core.js 后执行
+```
+
+两个套件会检查这一步没被忘记：`contract.mjs` 断言内联内容与源文件逐字一致，`client-core.mjs` 断言 bundle 在只有 `react` 可用的情况下能注册、导出 `apply`/`inject`。
+
 - **Host 半**：skillbox 的唯一写入者——生成、维护 `.skillbox.json`、复制／删除启用副本、注册两个工具、提供 HTTP 表。
-- **Client 半**：一个手写的 DSH 客户端 bundle（`window.__ModuleLoader__.load`，无构建步骤）。`client-core.js` 先加载并装上 `globalThis.__dshSkillboxCore`，`client.js` 只保留组件，注册三个壳座位：`shell.overlay`（右侧侧边栏）、`sidebar.footer.action`（生成按钮）、`conversation.input.dock`（试用/进度卡片）。
+- **Client 半**：一个手写的 DSH 客户端 bundle（`window.__ModuleLoader__.load`，无构建步骤），注册三个壳座位：`shell.overlay`（右侧侧边栏）、`sidebar.footer.action`（生成按钮）、`conversation.input.dock`（试用/进度卡片）。
 - **启用即副本**：模型能不能看到某个 skill，只取决于 `.dsh/skills/<name>/SKILL.md` 是否存在。这让「启用开关」拥有一份唯一真相，也让 DSH 自带的文件监听负责推送目录变更。
 
 ## 开发
@@ -260,6 +268,14 @@ skillbox 必须落在**用户的工作区**，而不是 DSH 的配置目录。�
 - DSH 的 HMR 不监视工作区，插件代码改动需要重启 DSH 生效。
 
 ## 变更记录
+
+### v0.3.1 —— 客户端 bundle 自包含
+
+v0.3.0 曾用 `dsh.client.external` 声明 `./client-core.js`，让浏览器额外加载一个脚本。但 DSH 客户端的 `external` 语义是“由另一个**已注册**的客户端包提供”，普通附带脚本不在其列；一旦加载器不认这条声明，整个插件 bundle 会加载失败（而不是优雅降级）。这是一个没有被真实加载器验证过的发布风险，v0.3.1 收掉它：
+
+- **`lib/client.js` 恢复为单文件自包含 bundle**：`lib/client-core.js` 降级为**作者源**，由 `.selftest/sync-client-core.mjs` 抽掉 IIFE 外壳与发布尾巴后逐行内联进 `client.js` 的标记块。`package.json` 里移除 `dsh.client.external`。
+- **内联过程被测试钉住**：`contract.mjs` 断言“内联内容与 `client-core.js` 逐字一致”（忘跑同步脚本会失败），`client-core.mjs` 断言“bundle 在只有 `react` 可用时能注册并导出 `apply`/`inject`”。
+- 过程中修掉两个只有真实评测才暴露的问题：内联时若连同核的 CommonJS 尾巴一起拷进去，会覆盖并丢掉 bundle 自己的 `exports.apply`/`exports.inject`；若保留 `globalThis` 发布行，bundle 就会依赖一个并不需要的全局。
 
 ### v0.3.0 —— 工程化与可复现
 

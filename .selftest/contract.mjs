@@ -38,10 +38,11 @@ const check = (condition, message) => {
 }
 
 /**
- * Read one entry out of the browser core's `CONTRACT` table.
+ * Read one entry out of the browser contract table.
  *
- * The browser bundle cannot import `lib/contract.js`, so `client-core.js` restates
- * the contract; this is the check that keeps the restatement honest.
+ * The table lives in `lib/client-core.js` (the authoring source) and is inlined into
+ * `lib/client.js` by `.selftest/sync-client-core.mjs`, so reading the source file is
+ * reading what actually ships — provided the two are in sync, which is asserted below.
  */
 function coreContract(name) {
   const table = /var CONTRACT = \{([\s\S]*?)\n  \}\n/.exec(coreSource)
@@ -57,6 +58,11 @@ function readLiteral(source, name) {
   if (entry === null) return undefined
   return Function(`"use strict"; return (${entry[1]})`)()
 }
+
+// 0. The shipped bundle contains the current core verbatim.
+const { sync } = await import('./sync-client-core.mjs')
+const syncResult = sync({ write: false })
+check(!syncResult.changed, 'lib/client.js contains the current lib/client-core.js (run .selftest/sync-client-core.mjs)')
 
 // 1. The API prefix and version the browser half addresses.
 check(coreContract('API_PREFIX') === API_PREFIX, `client-core API_PREFIX mirrors the host (${API_PREFIX})`)

@@ -41,15 +41,18 @@
 
 **问题**：1063 行里混着 CSS、图标、React 组件、API 调用、状态机。API 调用依赖全局 `fetch`，状态机依赖 `setInterval`，没有注入点，因此 Node 里跑不起来，只能靠浏览器手点。
 
-**处置**：把非 React 部分抽到 `lib/client-core.js`（经典脚本 IIFE，装到 `globalThis.__dshSkillboxCore`），`client.js` 通过 `package.json` 的 `dsh.client.external` 先加载它，只保留 React 组件。核心接受注入的 `fetch` / `now` / `random` / `interval`，于是 `.selftest/client-core.mjs` 可以在 Node 里用假宿主和假时钟断言：
+**处置**：把非 React 部分抽到 `lib/client-core.js`（经典脚本 IIFE，便于单独求值），`.selftest/sync-client-core.mjs` 把它的正文抽掉外壳后逐行内联进 `lib/client.js` 的标记块，交付的 bundle 仍是**单文件自包含**。核心接受注入的 `fetch` / `now` / `random` / `interval`，于是 `.selftest/client-core.mjs` 可以在 Node 里用假宿主和假时钟断言：
 
 - 调用地址落在契约前缀、`sessionId` 作为 query 传递；
 - 失败被包装成带 `code` 的 `HostError`，`display` 给出本地化文案；
 - 版本不匹配与契约外方法名都会被拦下；
 - 授权窗口状态机：`select → author` 的推进由 `topicMs` 决定，窗口未到不推进，窗口到了推进且只播报一次，窗口内重复生成被忽略；
-- `cancelGeneration` 真的删掉了刚写的 skill。
+- `cancelGeneration` 真的删掉了刚写的 skill；
+- bundle 在只有 `react` 可用的环境下能注册、导出 `apply`/`inject`。
 
-**副作用**：`client.js` 从 1063 行降到 760 行，且“哪些是纯逻辑、哪些是渲染”一眼可分。
+**副作用**：`client.js` 里的手写组件部分从 1063 行降到约 690 行，且“哪些是纯逻辑、哪些是渲染”一眼可分。
+
+> **一次自我纠正（v0.3.1）**：v0.3.0 最初把这层拆分做成了运行时加载——用 `dsh.client.external` 声明 `./client-core.js`，让浏览器先加载一个独立脚本。但 DSH 的 `external` 语义是“由另一个**已注册**的客户端包提供”，普通附带脚本不在其列；一旦加载器不认这条声明，整个插件 bundle 会加载失败，而不是优雅降级。这是我无法在本地真实加载器上验证的行为，属于把可用性押在未验证假设上。v0.3.1 改为生成式内联：源码仍可单测，交付物只有 `client.js` 一个文件，内联一致性由两个测试套件钉住。
 
 ### 3. 生成不可复现（高）
 
@@ -109,7 +112,7 @@
 
 ---
 
-## 三、路线图（v0.3.0 未做，按优先级）
+## 三、路线图（v0.3.x 未做，按优先级）
 
 1. **i18n**：已声明 `dsh-client-locale` 却没用。做法：`ctx.locale.register("skillbox", { zh, en })`，组件改用 `t()`；`generator` 的领域/配方文案需要一份英文副本或双语数据（这是真正的成本所在，不适合塞进一次版本）。
 2. **客户端组件测试**：把 `SkillCard` / `AuthoringCard` 放到 `@deepseek-ai/dsh-client-test-runtime` 下渲染。核心已可测，组件仍只能靠手点。
@@ -117,16 +120,19 @@
 4. **并发写保护**：`.skillbox.json` 目前只有原子替换，多窗口同时写会互相覆盖。可加锁文件或版本号 + 乐观重试。
 5. **服务端限流**：`kick` 目前无节流，快速连点会连写多个 trial（一次只有一个 pending，但磁盘上会留多个）。加一个最小间隔。
 6. **面板与右侧栏集成**：现在是 `shell.overlay` 上的固定定位面板，等价于自绘侧边栏。改用 `ctx.sidebarRightTabs` 能获得 DSH 原生的分栏/拖拽/持久化，代价是必须处理无会话时不可用的限制。
+7. **在真实加载器上验证 client bundle**：`client-core.mjs` 用桩 `require` 验证了自包含，但“DSH 客户端模块系统能否加载这个 bundle”仍只能靠重启后的实测。这是当前最大的未验证面。
 
 ---
 
-## 四、v0.3.0 的验证强度
+## 四、v0.3.x 的验证强度
 
 | 套件 | 覆盖 |
 |---|---|
-| `.selftest/contract.mjs` | 前缀/版本/方法表/错误码镜像、Host 实现完整性、面板动作在核心中存在、工具 schema 与渲染一致 |
-| `.selftest/client-core.mjs` | 浏览器核心：调用契约、错误包装与本地化、版本不匹配、契约外方法、授权窗口状态机、取消失效、镜像不漂移 |
+| `.selftest/contract.mjs` | 内联同步（client.js ⊇ client-core.js 逐字）、前缀/版本/方法表/错误码镜像、Host 实现完整性、面板动作在核心中存在、工具 schema 与渲染一致 |
+| `.selftest/client-core.mjs` | 浏览器核心：调用契约、错误包装与本地化、版本不匹配、契约外方法、授权窗口状态机、取消失效，以及 bundle 自包含（只有 `react` 可用时能注册并导出 `apply`/`inject`） |
 | `.selftest/harness.mjs` | 真实 HTTP 服务器：认证栅栏、404/405/413/400、信封与错误码、目录接口、收窄选题、种子重放逐字节一致、跨工作区拒绝、完整生命周期 |
 | `.selftest/root-resolution.mjs` | 工作区根判定（含拒绝名单）、400 次抽取全覆盖且结构达标、重放确定性、`ContractError` 语义 |
 
 四个套件全部在 Node 里跑，不需要浏览器、不需要运行中的 DSH——这是把缺陷 2 修掉之后才可能有的东西。
+
+**仍未验证的一面**（路线图第 7 项）：DSH 客户端模块系统能否加载这个 bundle，只能在重启后的真实页面上确认。桩 `require` 只能证明“代码本身自洽且自包含”，不能证明“加载器接受它”。

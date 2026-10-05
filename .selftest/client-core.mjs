@@ -169,10 +169,33 @@ const skillsView = (skills = []) => ({ root: 'C:/ws', skillboxDir: 'C:/ws/skillb
 
 // --- 5. The client bundle delegates to the core and mirrors nothing ----------
 
-check(clientSource.includes('__dshSkillboxCore'), 'client.js obtains the core from the global')
-check(!clientSource.includes('const CLIENT_METHODS'), 'client.js no longer restates the method list')
-check(!/class HostError/.test(clientSource), 'client.js no longer restates the failure class')
+check(clientSource.includes('createClientCore({'), 'client.js builds the core inline')
+check(
+  !/globalThis\.__dshSkillboxCore\s*=/.test(clientSource),
+  'client.js no longer publishes or reads a separately loaded core script',
+)
+check(clientSource.includes('var CONTRACT = {'), 'the contract table is inlined into the shipped bundle')
+check(!/class HostError/.test(clientSource), 'the inline core carries the failure class (no second copy)')
 check(/Object\.assign\(\{\}, api/.test(clientSource), 'client.js exposes one facade over snapshot and actions')
+
+// The shipped bundle must be self-contained: no separately loaded script, no
+// undeclared global, and its own exports intact after the core is spliced in.
+{
+  let registered = null
+  const reactStub = { createElement: () => null, useState: (value) => [value, () => {}], useEffect: () => {}, useRef: () => ({ current: null }) }
+  const requireStub = (name) => {
+    if (name === 'react') return reactStub
+    throw new Error(`unexpected require ${name}`)
+  }
+  new Function('window', 'require', clientSource)({ __ModuleLoader__: { load: (config) => { registered = config } } }, requireStub)
+  check(registered !== null && registered.id === 'dsh-skillbox', 'the bundle registers under the plugin id')
+  const bundle = registered.factory(requireStub)
+  check(typeof bundle.apply === 'function', 'the bundle exports apply')
+  check(
+    Array.isArray(bundle.inject) && bundle.inject.includes('slots'),
+    `the bundle exports its service inject list (${JSON.stringify(bundle.inject)})`,
+  )
+}
 
 // --- 6. Every host call the bundle makes is inside the contract -------------
 
