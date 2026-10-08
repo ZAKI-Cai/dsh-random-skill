@@ -66,20 +66,34 @@ export function unwrapCore(coreSource) {
     throw new Error('client-core.js: expected the classic-script IIFE wrapper')
   }
   const body = lines.slice(openAt + 1, closeIndex)
-  // The tail of the core publishes the factory for standalone loads (a global and a
-  // CommonJS export block). Neither belongs in the bundle: `createClientCore` is
-  // already in scope there, and letting the core re-assign `module.exports` would
-  // discard the bundle's own `exports.apply` / `exports.inject`. Both are removed by
-  // position — filtering every `}` line would also delete braces that close real
-  // blocks.
-  const publicationAt = body.findIndex(
+  // The tail of the core publishes the factory for standalone loads: a comment block,
+  // a global assignment, and a CommonJS export block. None of it belongs in the
+  // bundle — `createClientCore` is already in scope there, and letting the core
+  // re-assign `module.exports` would discard the bundle's own `exports.apply` /
+  // `exports.inject`.
+  //
+  // The cut therefore starts at the *comment* above that code, not at the code
+  // itself: keeping a comment whose closing `*/` was removed would emit a dangling
+  // comment into the bundle. Walk back over the contiguous comment lines first.
+  let cut = body.findIndex(
     (line) => line.includes('globalThis.__dshSkillboxCore = createClientCore') || line.includes("typeof module !== 'undefined'"),
   )
-  const withoutPublication = publicationAt === -1 ? body : body.slice(0, publicationAt)
-  const withoutDirective = withoutPublication.filter((line, index) => !(index === 0 && line.trim() === "'use strict'"))
+  if (cut === -1) cut = body.length
+  const isPublicationBanner = (line) => /^\s*(\/\/|\*)/.test(line) || line.trim() === ''
+  while (cut > 0 && isPublicationBanner(body[cut - 1])) {
+    // A block that already opens and closes on one line is an unrelated standalone
+    // comment, not part of the banner.
+    const candidate = body[cut - 1].trim()
+    if (candidate.startsWith('/*') && candidate.endsWith('*/')) break
+    cut -= 1
+  }
+  const withoutDirective = body
+    .slice(0, cut)
+    .filter((line, index) => !(index === 0 && line.trim() === "'use strict'"))
   return withoutDirective
     .map((line) => (line === '' ? '' : `\t\t${line}`))
     .join('\n')
+    .replace(/\n+$/, '')
 }
 
 /** Read both files, splice, and report whether the bundle changed. */

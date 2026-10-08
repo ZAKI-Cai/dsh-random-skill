@@ -67,9 +67,9 @@ assert(rememberedApi.workspaceRoot() === PROJECT, 'an agent-scoped call teaches 
 //    enough" from regressing as families are added.
 const generator = await import('../lib/generator.js')
 const catalogue = generator.catalogue()
-assert(catalogue.length >= 8, `at least 8 domains are catalogued (${catalogue.length})`)
-assert(generator.families().length >= 36, `at least 36 task families are catalogued (${generator.families().length})`)
-assert(generator.combinationCount() >= 100, `at least 100 family×recipe combinations (${generator.combinationCount()})`)
+assert(catalogue.length >= 16, `at least 16 domains are catalogued (${catalogue.length})`)
+assert(generator.families().length >= 70, `at least 70 task families are catalogued (${generator.families().length})`)
+assert(generator.combinationCount() >= 200, `at least 200 family×recipe combinations (${generator.combinationCount()})`)
 
 const seenDomains = new Set()
 const taken = new Set()
@@ -83,6 +83,34 @@ for (let index = 0; index < 400; index += 1) {
 }
 assert(seenDomains.size === catalogue.length, `400 draws reach every domain (${seenDomains.size}/${catalogue.length})`)
 assert(shortest >= generator.MIN_DOCUMENT_CHARS, `every draw meets the minimum document size (shortest ${shortest})`)
+
+// 4b. Every task family, on every recipe it offers, must produce a valid document.
+//     A random sample does not cover this: one mistyped field in one family would
+//     only surface once in a few thousand draws. Walking the whole catalogue is what
+//     makes "just add a family" safe — and it is the check that caught nothing here
+//     only because the data was written carefully, which is exactly the point.
+let familyChecks = 0
+for (const { domainId, family } of generator.families()) {
+  for (const recipe of family.recipes) {
+    const skill = generator.generateSkill({ seed: 7, domainId, familyId: family.id, recipes: [recipe], taken: [] })
+    familyChecks += 1
+    if (!skill.validation.ok) {
+      throw new Error(`${domainId}/${family.id}/${recipe} produced an invalid document: ${skill.validation.problems.join('; ')}`)
+    }
+    for (const field of ['name', 'description', 'whenToUse', 'body', 'domain', 'family', 'recipe', 'topic']) {
+      if (skill[field] === undefined || skill[field] === null || skill[field] === '') {
+        throw new Error(`${domainId}/${family.id}/${recipe} left "${field}" empty`)
+      }
+    }
+    if (skill.characters < generator.MIN_DOCUMENT_CHARS) {
+      throw new Error(`${domainId}/${family.id}/${recipe} is too short (${skill.characters})`)
+    }
+    if (/\{[a-zA-Z]+\}/.test(skill.body)) {
+      throw new Error(`${domainId}/${family.id}/${recipe} left a template placeholder`)
+    }
+  }
+}
+assert(familyChecks >= 200, `every domain/family/recipe triple produces a valid document (${familyChecks} documents)`)
 
 // 5. Replay determinism: the same seed with the same pinned topic must reproduce
 //    the exact document, including its name. This is what the sidebar's "重放校验"

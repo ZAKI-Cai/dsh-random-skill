@@ -152,7 +152,8 @@ try {
   )
   out(`pending seed = ${pending.json?.offer?.seed}`)
 
-  // Determinism: the recorded seed must re-derive the document byte for byte.
+  // Determinism: the recorded seed must re-derive the document byte for byte. This
+  // runs before the depth sweep below, which replaces the pending skill.
   const replay = await request('POST', '/api/skillbox/replay', { name: skillName })
   out(
     `replay -> ${replay.status} seed=${replay.json?.seed} reproducible=${replay.json?.reproducible} replayedName=${replay.json?.replayedName}`,
@@ -160,6 +161,40 @@ try {
   if (replay.json?.reproducible !== true) {
     throw new Error(`replay of ${skillName} was not reproducible: ${JSON.stringify(replay.json?.differences)}`)
   }
+
+  // Depth steering: the same family at three depths must differ in size, and the
+  // deepest must carry the worked example.
+  const sizesByDepth = {}
+  for (const depth of ['brief', 'standard', 'deep']) {
+    const drawn = await request('POST', '/api/skillbox/kick', {
+      topic: { domainId: 'law', familyId: 'contract-review' },
+      depth,
+    })
+    sizesByDepth[depth] = drawn.json?.skill?.characters
+    out(
+      `kick(depth=${depth}) -> ${drawn.status} chars=${drawn.json?.skill?.characters} label=${drawn.json?.skill?.depthLabel} example=${drawn.json?.skill?.hasExample} valid=${drawn.json?.skill?.validation?.ok}`,
+    )
+    await request('POST', '/api/skillbox/remove', { name: drawn.json?.skill?.name })
+  }
+  out(`depth ordering -> ${JSON.stringify(sizesByDepth)}`)
+  if (!(sizesByDepth.brief < sizesByDepth.standard && sizesByDepth.standard < sizesByDepth.deep)) {
+    throw new Error(`depth tiers are not ordered: ${JSON.stringify(sizesByDepth)}`)
+  }
+  // Depth must survive the metadata round trip that replay and the sidebar rely on.
+  const deepDraw = await request('POST', '/api/skillbox/kick', {
+    topic: { domainId: 'law', familyId: 'contract-review' },
+    depth: 'deep',
+  })
+  const deepReplay = await request('POST', '/api/skillbox/replay', { name: deepDraw.json?.skill?.name })
+  out(`deep replay -> reproducible=${deepReplay.json?.reproducible}`)
+  if (deepReplay.json?.reproducible !== true) {
+    throw new Error('a deep document did not replay byte for byte')
+  }
+  await request('POST', '/api/skillbox/remove', { name: deepDraw.json?.skill?.name })
+
+  // Re-stage the primary offer that the rest of this run works with.
+  const restage = await request('POST', '/api/skillbox/kick', {})
+  out(`re-stage -> ${restage.status} name=${restage.json?.skill?.name}`)
 
   // The same seed twice must produce identical bytes through the generator itself.
   const generator = await import('../lib/generator.js')

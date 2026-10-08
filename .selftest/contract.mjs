@@ -59,10 +59,22 @@ function readLiteral(source, name) {
   return Function(`"use strict"; return (${entry[1]})`)()
 }
 
-// 0. The shipped bundle contains the current core verbatim.
+// 0. The shipped bundle contains the current core verbatim, and the inlining left no
+//    scars: an unbalanced block comment would be a syntax hazard inside the bundle.
 const { sync } = await import('./sync-client-core.mjs')
 const syncResult = sync({ write: false })
 check(!syncResult.changed, 'lib/client.js contains the current lib/client-core.js (run .selftest/sync-client-core.mjs)')
+{
+  const block = /\t\t\/\/#region skillbox: client\/<core>[\s\S]*?\t\t\/\/#endregion skillbox: client\/<core>/.exec(syncResult.clientSource)
+  check(block !== null, 'the generated core block is present in the bundle')
+  if (block !== null) {
+    const opened = (block[0].match(/\/\*/g) ?? []).length
+    const closed = (block[0].match(/\*\//g) ?? []).length
+    check(opened === closed, `the inlined core has balanced block comments (${opened} open / ${closed} close)`)
+    check(!/globalThis\.__dshSkillboxCore\s*=/.test(block[0]), 'the inlined core does not publish the standalone global')
+    check(!/typeof module !== 'undefined'/.test(block[0]), 'the inlined core does not re-assign module.exports')
+  }
+}
 
 // 1. The API prefix and version the browser half addresses.
 check(coreContract('API_PREFIX') === API_PREFIX, `client-core API_PREFIX mirrors the host (${API_PREFIX})`)

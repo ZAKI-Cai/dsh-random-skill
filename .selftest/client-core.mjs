@@ -167,6 +167,59 @@ const skillsView = (skills = []) => ({ root: 'C:/ws', skillboxDir: 'C:/ws/skillb
   check(core.store.get().offer === null, 'cancelling drops the offer')
 }
 
+// --- 5. The sticky draw controls travel to the host -------------------------
+
+{
+  let offerName = 'law-analyze-kit-1234'
+  const { impl, calls } = makeFetch({
+    kick: () => ({ skill: { name: offerName }, view: skillsView([]) }),
+    decide: (body) => ({ name: body.name, decision: body.decision, view: skillsView([]) }),
+  })
+  const core = coreFactory({ fetch: impl, interval: () => 1, clearInterval: () => {} })
+
+  /** Draw once and settle the window, so the next draw is not refused. */
+  const draw = async (options) => {
+    const skill = await core.api.generate(options)
+    if (skill !== null) {
+      offerName = skill.name
+      await core.api.decide(skill.name, 'keep')
+    }
+    return calls.filter((entry) => entry.method === 'kick').at(-1)
+  }
+
+  // Default: no narrowing, so the host draws from the whole catalogue.
+  const plain = await draw()
+  check(
+    plain.body.topic === undefined && plain.body.depth === undefined,
+    'an untouched picker sends no narrowing at all',
+  )
+
+  core.api.setDomain('law')
+  core.api.setDepth('deep')
+  const narrowed = await draw()
+  check(narrowed.body.topic?.domainId === 'law', 'the selected domain reaches the host')
+  check(narrowed.body.depth === 'deep', 'the selected depth reaches the host')
+  check(core.store.get().error === null, 'the narrowed draw completes without an error')
+
+  // A one-off override must not disturb the sticky choice.
+  core.api.setDomain('')
+  const overridden = await draw({ domainId: 'bio' })
+  check(overridden.body.topic?.domainId === 'bio', 'a one-off domain overrides the sticky value')
+  check(core.store.get().domainId === '', 'the one-off override leaves the sticky value alone')
+
+  // Clearing the depth falls back to the host default again.
+  core.api.setDepth('')
+  const defaulted = await draw()
+  check(defaulted.body.depth === undefined, 'clearing the depth stops sending one')
+
+  // And a draw made while a window is already open must be refused outright.
+  const pending = core.api.generate()
+  const refused = await core.api.generate()
+  check(refused === null, 'a second draw during an open window is refused, not queued')
+  const opened = await pending
+  if (opened !== null) await core.api.cancelGeneration()
+}
+
 // --- 5. The client bundle delegates to the core and mirrors nothing ----------
 
 check(clientSource.includes('createClientCore({'), 'client.js builds the core inline')
